@@ -1,2 +1,4 @@
-aiogram==3.0.0b7
+aiogram==2.25.1
+aiohttp
+python-dotenv
 ffmpeg-python
