@@ -19,9 +19,9 @@ logging.basicConfig(
 )
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
 DOWNLOAD_DIR = "/tmp"
 MAX_SIZE = 1024 * 1024 * 1024  # 1GB
+PROGRESS_CHUNK = 5 * 1024 * 1024  # 5 MB
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -33,27 +33,36 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     size = video.file_size
 
     if size > MAX_SIZE:
-        await update.message.reply_text("❌ Video 1GB dan katta. Telegram bot limiti sabab yuklab bo‘lmaydi.")
+        await update.message.reply_text("❌ Video 1GB dan katta. Yuklab bo‘lmaydi.")
         return
 
-    await update.message.reply_text("📥 Video yuklanmoqda...")
+    msg = await update.message.reply_text(
+        f"📥 Video yuklanmoqda: 0 MB / {size / (1024*1024):.1f} MB"
+    )
 
     file = await context.bot.get_file(video.file_id)
     file_url = file.file_path
     full_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_url}"
-
     input_path = os.path.join(DOWNLOAD_DIR, f"{video.file_id}.mp4")
 
     try:
         r = requests.get(full_url, stream=True, timeout=60)
         total = int(r.headers.get("content-length", 0))
         downloaded = 0
+        last_update = 0
+        chunk_size = 1024 * 1024  # 1 MB
 
         with open(input_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1024 * 1024):
+            for chunk in r.iter_content(chunk_size=chunk_size):
                 if chunk:
                     f.write(chunk)
                     downloaded += len(chunk)
+                    # progress har PROGRESS_CHUNK yoki oxirida yangilanadi
+                    if downloaded - last_update >= PROGRESS_CHUNK or downloaded == total:
+                        await msg.edit_text(
+                            f"📥 Video yuklanmoqda: {downloaded / (1024*1024):.1f} MB / {total / (1024*1024):.1f} MB"
+                        )
+                        last_update = downloaded
 
         context.user_data["video_path"] = input_path
 
@@ -88,7 +97,6 @@ async def encode_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     output_path = input_path.replace(".mp4", f"_{resolution}p.mp4")
-
     await query.edit_message_text(f"⚙️ {resolution}p ga encode qilinmoqda...")
 
     cmd = [
@@ -132,7 +140,6 @@ def main():
         return
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video))
     app.add_handler(CallbackQueryHandler(encode_video))
