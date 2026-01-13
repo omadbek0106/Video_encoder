@@ -1,113 +1,145 @@
 import os
 import logging
+import asyncio
+import requests
 import subprocess
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from aiogram.utils import executor
-from dotenv import load_dotenv
-
-# ---------- LOG ----------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s"
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
 )
 
-# ---------- ENV ----------
-load_dotenv()
+logging.basicConfig(
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-if not BOT_TOKEN:
-    raise Exception("BOT_TOKEN topilmadi!")
+DOWNLOAD_DIR = "/tmp"
+MAX_SIZE = 1024 * 1024 * 1024  # 1GB
 
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)
 
-DOWNLOAD_DIR = "videos"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🎬 Videoni yuboring va men uni qayta ishlayman.")
 
-last_video = {}
 
-# ---------- START ----------
-@dp.message_handler(commands=["start"])
-async def start(message: types.Message):
-    await message.reply("🎬 Videoni yuboring va men uni 240p / 360p / 480p qilib beraman.")
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    video = update.message.video
+    size = video.file_size
 
-# ---------- VIDEO / FILE ----------
-@dp.message_handler(content_types=["video", "document"])
-async def receive_video(message: types.Message):
+    if size > MAX_SIZE:
+        await update.message.reply_text("❌ Video 1GB dan katta. Telegram bot limiti sabab yuklab bo‘lmaydi.")
+        return
+
+    await update.message.reply_text("📥 Video yuklanmoqda...")
+
+    file = await context.bot.get_file(video.file_id)
+    file_url = file.file_path
+    full_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_url}"
+
+    input_path = os.path.join(DOWNLOAD_DIR, f"{video.file_id}.mp4")
+
     try:
-        media = message.video or message.document
+        r = requests.get(full_url, stream=True, timeout=60)
+        total = int(r.headers.get("content-length", 0))
+        downloaded = 0
 
-        if not media.file_name.endswith((".mp4", ".mkv", ".mov", ".avi")):
-            await message.reply("❌ Faqat video fayl yuboring.")
-            return
+        with open(input_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+                    downloaded += len(chunk)
 
-        msg = await message.reply("📥 Video yuklanmoqda...")
-
-        file = await bot.get_file(media.file_id)
-        input_path = f"{DOWNLOAD_DIR}/{media.file_name}"
-
-        await bot.download_file(file.file_path, input_path)
-
-        last_video[message.from_user.id] = input_path
-
-        kb = ReplyKeyboardMarkup(resize_keyboard=True)
-        kb.add(KeyboardButton("240p"), KeyboardButton("360p"), KeyboardButton("480p"))
-
-        await msg.edit_text("✅ Video qabul qilindi!\nSifatni tanlang:", reply_markup=kb)
-        logging.info(f"Video yuklandi: {input_path}")
+        context.user_data["video_path"] = input_path
 
     except Exception as e:
         logging.error(f"Download error: {e}")
-        await message.reply("❌ Video yuklashda xatolik.")
+        await update.message.reply_text("❌ Video yuklab bo‘lmadi.")
+        return
 
-# ---------- QUALITY ----------
-@dp.message_handler(lambda m: m.text in ["240p", "360p", "480p"])
-async def encode(message: types.Message):
-    try:
-        user_id = message.from_user.id
-
-        if user_id not in last_video:
-            await message.reply("Avval video yuboring.")
-            return
-
-        input_file = last_video[user_id]
-        quality = message.text
-
-        scale = {
-            "240p": "426:240",
-            "360p": "640:360",
-            "480p": "854:480"
-        }[quality]
-
-        output = input_file.replace(".", f"_{quality}.")
-
-        await message.reply(f"⚙️ {quality} ga encode qilinmoqda...")
-
-        cmd = [
-            "ffmpeg", "-y", "-i", input_file,
-            "-vf", f"scale={scale}",
-            "-preset", "ultrafast",
-            "-c:v", "libx264",
-            "-crf", "30",
-            "-c:a", "aac",
-            output
+    keyboard = [
+        [
+            InlineKeyboardButton("240p ⚡", callback_data="240"),
+            InlineKeyboardButton("360p", callback_data="360"),
+            InlineKeyboardButton("480p", callback_data="480"),
         ]
+    ]
 
-        logging.info("FFmpeg start")
+    await update.message.reply_text(
+        "📊 Qaysi sifatda chiqarsin?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def encode_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    resolution = query.data
+    input_path = context.user_data.get("video_path")
+
+    if not input_path:
+        await query.edit_message_text("❌ Video topilmadi.")
+        return
+
+    output_path = input_path.replace(".mp4", f"_{resolution}p.mp4")
+
+    await query.edit_message_text(f"⚙️ {resolution}p ga encode qilinmoqda...")
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", input_path,
+        "-vf", f"scale=-2:{resolution}",
+        "-preset", "ultrafast",
+        "-c:v", "libx264",
+        "-crf", "32",
+        "-c:a", "aac",
+        output_path,
+    ]
+
+    try:
         subprocess.run(cmd, check=True)
-
-        await message.reply_document(open(output, "rb"), caption=f"🎬 {quality} tayyor!")
-        logging.info(f"Encode tugadi: {output}")
-
-    except subprocess.CalledProcessError as e:
-        logging.error(f"FFmpeg error: {e}")
-        await message.reply("❌ Encode paytida xatolik bo‘ldi.")
     except Exception as e:
-        logging.error(f"General error: {e}")
-        await message.reply("❌ Noma’lum xatolik.")
+        logging.error(f"FFmpeg error: {e}")
+        await query.edit_message_text("❌ Encode qilishda xato.")
+        return
 
-# ---------- RUN ----------
+    await query.edit_message_text("📤 Telegramga yuklanmoqda...")
+
+    try:
+        await context.bot.send_video(
+            chat_id=query.message.chat_id,
+            video=open(output_path, "rb"),
+        )
+    except Exception as e:
+        logging.error(f"Upload error: {e}")
+        await query.edit_message_text("❌ Video yuborib bo‘lmadi.")
+        return
+
+    os.remove(input_path)
+    os.remove(output_path)
+
+
+def main():
+    if not BOT_TOKEN:
+        print("BOT_TOKEN topilmadi")
+        return
+
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.VIDEO, handle_video))
+    app.add_handler(CallbackQueryHandler(encode_video))
+
+    print("Bot ishga tushdi...")
+    app.run_polling()
+
+
 if __name__ == "__main__":
-    logging.info("Bot ishga tushdi")
-    executor.start_polling(dp, skip_updates=True)
+    main()
