@@ -1,8 +1,7 @@
 import os
 import logging
-import asyncio
-import requests
 import subprocess
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -10,143 +9,167 @@ from telegram.ext import (
     MessageHandler,
     CallbackQueryHandler,
     ContextTypes,
-    filters,
+    filters
 )
 
+# ================= LOG =================
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+    level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DOWNLOAD_DIR = "/tmp"
-MAX_SIZE = 1024 * 1024 * 1024  # 1GB
-PROGRESS_CHUNK = 5 * 1024 * 1024  # 5 MB
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN yo‘q (Railway Variables)")
 
+DOWNLOAD_DIR = "downloads"
+OUTPUT_DIR = "outputs"
+os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🎬 Videoni yuboring va men uni qayta ishlayman.")
-
-
-async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    video = update.message.video
-    size = video.file_size
-
-    if size > MAX_SIZE:
-        await update.message.reply_text("❌ Video 1GB dan katta. Yuklab bo‘lmaydi.")
-        return
-
-    msg = await update.message.reply_text(
-        f"📥 Video yuklanmoqda: 0 MB / {size / (1024*1024):.1f} MB"
+    await update.message.reply_text(
+        "👋 Salom!\n🎬 Videoni yuboring."
     )
 
-    file = await context.bot.get_file(video.file_id)
-    file_url = file.file_path
-    full_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_url}"
-    input_path = os.path.join(DOWNLOAD_DIR, f"{video.file_id}.mp4")
+# ================= VIDEO QABUL =================
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    video = update.message.video
+    context.user_data.clear()
 
-    try:
-        r = requests.get(full_url, stream=True, timeout=60)
-        total = int(r.headers.get("content-length", 0))
-        downloaded = 0
-        last_update = 0
-        chunk_size = 1024 * 1024  # 1 MB
+    context.user_data["file_id"] = video.file_id
+    context.user_data["file_size"] = video.file_size
 
-        with open(input_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=chunk_size):
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    # progress har PROGRESS_CHUNK yoki oxirida yangilanadi
-                    if downloaded - last_update >= PROGRESS_CHUNK or downloaded == total:
-                        await msg.edit_text(
-                            f"📥 Video yuklanmoqda: {downloaded / (1024*1024):.1f} MB / {total / (1024*1024):.1f} MB"
-                        )
-                        last_update = downloaded
-
-        context.user_data["video_path"] = input_path
-
-    except Exception as e:
-        logging.error(f"Download error: {e}")
-        await update.message.reply_text("❌ Video yuklab bo‘lmadi.")
-        return
+    size_mb = video.file_size / (1024 * 1024)
 
     keyboard = [
         [
-            InlineKeyboardButton("240p ⚡", callback_data="240"),
-            InlineKeyboardButton("360p", callback_data="360"),
-            InlineKeyboardButton("480p", callback_data="480"),
+            InlineKeyboardButton("▶️ Qayta ishlash", callback_data="process"),
+            InlineKeyboardButton("❌ Bekor qilish", callback_data="cancel")
         ]
     ]
 
     await update.message.reply_text(
-        "📊 Qaysi sifatda chiqarsin?",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        f"🎬 Video qabul qilindi\n📦 Hajmi: {size_mb:.1f} MB\n\nNima qilamiz?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-
-async def encode_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= QAROR =================
+async def decision_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    resolution = query.data
+    if query.data == "cancel":
+        context.user_data.clear()
+        await query.edit_message_text("❌ Bekor qilindi.")
+        return
+
+    if query.data == "process":
+        await query.edit_message_text("⏬ Yuklab olinmoqda...")
+        await download_video(query, context)
+
+# ================= YUKLASH =================
+async def download_video(query, context):
+    file_id = context.user_data.get("file_id")
+    total = context.user_data.get("file_size")
+
+    file = await context.bot.get_file(file_id)
+    path = f"{DOWNLOAD_DIR}/{file_id}.mp4"
+
+    downloaded = 0
+    last = 0
+
+    async for chunk in file.download_as_bytearray():
+        with open(path, "ab") as f:
+            f.write(chunk)
+
+        downloaded += len(chunk)
+        mb = downloaded / (1024 * 1024)
+        total_mb = total / (1024 * 1024)
+
+        if mb - last >= 10:
+            last = mb
+            try:
+                await query.edit_message_text(
+                    f"⏬ Yuklanmoqda...\n{mb:.1f} / {total_mb:.1f} MB"
+                )
+            except:
+                pass
+
+    context.user_data["video_path"] = path
+
+    keyboard = [
+        [InlineKeyboardButton("240p ⚡ Juda tez", callback_data="240")],
+        [
+            InlineKeyboardButton("360p", callback_data="360"),
+            InlineKeyboardButton("480p", callback_data="480")
+        ]
+    ]
+
+    await query.edit_message_text(
+        "✅ Yuklab olindi!\n📽 Sifatni tanlang:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# ================= SIFAT =================
+async def quality_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    quality = query.data
     input_path = context.user_data.get("video_path")
 
     if not input_path:
         await query.edit_message_text("❌ Video topilmadi.")
         return
 
-    output_path = input_path.replace(".mp4", f"_{resolution}p.mp4")
-    await query.edit_message_text(f"⚙️ {resolution}p ga encode qilinmoqda...")
+    output = f"{OUTPUT_DIR}/out_{quality}p.mp4"
 
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", input_path,
-        "-vf", f"scale=-2:{resolution}",
-        "-preset", "ultrafast",
-        "-c:v", "libx264",
-        "-crf", "32",
-        "-c:a", "aac",
-        output_path,
-    ]
+    await query.edit_message_text(
+        f"⚙️ {quality}p encode qilinmoqda..."
+    )
 
     try:
-        subprocess.run(cmd, check=True)
-    except Exception as e:
-        logging.error(f"FFmpeg error: {e}")
-        await query.edit_message_text("❌ Encode qilishda xato.")
-        return
-
-    await query.edit_message_text("📤 Telegramga yuklanmoqda...")
-
-    try:
-        await context.bot.send_video(
-            chat_id=query.message.chat_id,
-            video=open(output_path, "rb"),
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", input_path,
+                "-vf", f"scale=-2:{quality}",
+                "-preset", "ultrafast",
+                "-c:a", "copy",
+                output
+            ],
+            check=True
         )
+
+        await query.message.reply_video(
+            video=open(output, "rb"),
+            caption=f"✅ Tayyor ({quality}p)"
+        )
+
     except Exception as e:
-        logging.error(f"Upload error: {e}")
-        await query.edit_message_text("❌ Video yuborib bo‘lmadi.")
-        return
+        logger.error(e)
+        await query.edit_message_text("❌ Xatolik.")
 
-    os.remove(input_path)
-    os.remove(output_path)
+    finally:
+        if os.path.exists(input_path):
+            os.remove(input_path)
+        if os.path.exists(output):
+            os.remove(output)
 
-
+# ================= MAIN =================
 def main():
-    if not BOT_TOKEN:
-        print("BOT_TOKEN topilmadi")
-        return
-
     app = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.VIDEO, handle_video))
-    app.add_handler(CallbackQueryHandler(encode_video))
+    app.add_handler(CallbackQueryHandler(decision_callback, pattern="process|cancel"))
+    app.add_handler(CallbackQueryHandler(quality_callback, pattern="^(240|360|480)$"))
 
-    print("Bot ishga tushdi...")
+    logger.info("Bot ishga tushdi")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
