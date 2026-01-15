@@ -1,100 +1,111 @@
 import os
 import asyncio
-from aiogram import Bot, types, Dispatcher
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InputFile, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils import exceptions
 from aiogram.filters import Command
+import aiohttp
+import ffmpeg
 
-TOKEN = os.getenv("BOT_TOKEN")
-API_ID = os.getenv("API_ID")  # Agar kerak bo'lsa
-API_HASH = os.getenv("API_HASH")  # Agar kerak bo'lsa
+# Environment variables
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+API_ID = os.getenv("API_ID")
+API_HASH = os.getenv("API_HASH")
 
-bot = Bot(token=TOKEN)
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Temporary storage for uploaded videos
-uploads = {}
-
-async def start_handler(message: types.Message):
-    await message.answer("Videoni yuboring va men uni qayta ishlab beraman!")
-
-@dp.message(Command("start"))
-async def start(message: types.Message):
-    await start_handler(message)
-
-@dp.message(content_types=[types.ContentType.VIDEO, types.ContentType.DOCUMENT])
-async def handle_video(message: types.Message):
-    if message.video or (message.document and message.document.mime_type.startswith("video")):
-        vid_id = message.video.file_id if message.video else message.document.file_id
-        file_size = message.video.file_size if message.video else message.document.file_size
-
-        # Sorash tugmasi
-        markup = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Qayta ishlaymiz", callback_data=f"process:{vid_id}")],
-                [InlineKeyboardButton(text="❌ Bekor qilamiz", callback_data=f"cancel:{vid_id}")]
-            ]
+# Progress update helper
+async def send_progress(chat_id, message_id, downloaded, total):
+    percent = int(downloaded / total * 100)
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=f"📥 Yuklanmoqda: {downloaded}MB / {total}MB ({percent}%)"
         )
-        uploads[vid_id] = {"file_size": file_size, "message_id": message.message_id, "chat_id": message.chat.id}
-        await message.answer(f"🎬 Video qabul qilindi! Hajmi: {round(file_size/1024/1024, 2)} MB\nQayta ishlaymizmi?", reply_markup=markup)
-    else:
-        await message.answer("Faqat video yoki video document yuboring!")
+    except exceptions.MessageNotModified:
+        pass
 
-@dp.callback_query(lambda c: c.data.startswith("process:"))
-async def process_video(callback_query: types.CallbackQuery):
-    vid_id = callback_query.data.split(":")[1]
-    info = uploads.get(vid_id)
-    if not info:
-        await callback_query.message.answer("Xato: video topilmadi!")
+# Start command
+@dp.message(Command("start"))
+async def start_cmd(message: types.Message):
+    await message.answer("🎬 Videoni yuboring va men uni qayta ishlab beraman. Forward videolar ham ishlaydi!")
+
+# Video or document handler
+@dp.message(lambda m: m.video or m.document)
+async def video_handler(message: types.Message):
+    file_size = message.video.file_size if message.video else message.document.file_size
+    if file_size > 1_100_000_000:  # ~1GB limit
+        await message.answer("❌ Fayl juda katta! Maks 1GB.")
         return
 
-    await callback_query.message.edit_text("📥 Yuklanmoqda... 0 MB / {} MB".format(round(info["file_size"]/1024/1024, 2)))
+    # Tasdiqlash
+    confirm_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("✅ Ha, qayta ishlash", callback_data="confirm_yes"),
+         InlineKeyboardButton("❌ Yo'q, bekor qil", callback_data="confirm_no")]
+    ])
+    await message.answer("📌 Siz video yubordingiz. Qayta ishlashni xohlaysizmi?", reply_markup=confirm_kb)
+    dp.current_file = message  # Saqlaymiz keyingi jarayon uchun
 
-    # Simulyatsiya qilamiz: real download progress
-    downloaded = 0
-    while downloaded < info["file_size"]:
-        await asyncio.sleep(0.1)  # Har 0.1s progress update
-        downloaded += 5*1024*1024  # 5MB
-        if downloaded > info["file_size"]:
-            downloaded = info["file_size"]
-        await callback_query.message.edit_text(
-            f"📥 Yuklanmoqda... {round(downloaded/1024/1024,2)} MB / {round(info['file_size']/1024/1024,2)} MB"
-        )
+# Callback query
+@dp.callback_query()
+async def cb_handler(callback: types.CallbackQuery):
+    data = callback.data
+    message = dp.current_file
 
-    # Tugmalar encode tanlash uchun
-    markup = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton("240p Ultra Fast", callback_data=f"encode:240:{vid_id}")],
-            [InlineKeyboardButton("360p Ultra Fast", callback_data=f"encode:360:{vid_id}")],
-            [InlineKeyboardButton("480p Ultra Fast", callback_data=f"encode:480:{vid_id}")]
-        ]
-    )
-    await callback_query.message.answer("📥 Yuklash tugadi! Formatni tanlang:", reply_markup=markup)
+    if data == "confirm_no":
+        await callback.message.edit_text("❌ Qayta ishlash bekor qilindi.")
+        return
 
-@dp.callback_query(lambda c: c.data.startswith("cancel:"))
-async def cancel_video(callback_query: types.CallbackQuery):
-    vid_id = callback_query.data.split(":")[1]
-    uploads.pop(vid_id, None)
-    await callback_query.message.edit_text("❌ Video bekor qilindi.")
+    if data == "confirm_yes":
+        await callback.message.edit_text("📥 Video yuklanmoqda...")
+        file_id = message.video.file_id if message.video else message.document.file_id
+        file = await bot.get_file(file_id)
+        file_path = file.file_path
+        dest_path = f"./{file.file_unique_id}.mp4"
 
-@dp.callback_query(lambda c: c.data.startswith("encode:"))
-async def encode_video(callback_query: types.CallbackQuery):
-    parts = callback_query.data.split(":")
-    resolution = parts[1]
-    vid_id = parts[2]
+        # Download with progress
+        async with aiohttp.ClientSession() as session:
+            tg_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+            async with session.get(tg_url) as resp:
+                total = int(resp.headers.get("Content-Length", 0)) // (1024*1024)  # MB
+                downloaded = 0
+                chunk_size = 1024 * 1024 * 5  # 5MB
+                with open(dest_path, "wb") as f:
+                    async for chunk in resp.content.iter_chunked(chunk_size):
+                        f.write(chunk)
+                        downloaded += len(chunk) // (1024*1024)
+                        await send_progress(callback.message.chat.id, callback.message.message_id, downloaded, total)
 
-    await callback_query.message.edit_text(f"⚡ Encode boshlandi: {resolution}p Ultra Fast")
+        # Format selection
+        format_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton("240p", callback_data="encode_240"),
+             InlineKeyboardButton("360p", callback_data="encode_360")],
+            [InlineKeyboardButton("480p", callback_data="encode_480"),
+             InlineKeyboardButton("Ultra Fast", callback_data="encode_fast")]
+        ])
+        await callback.message.edit_text("🎞 Videoni encode qilish formatini tanlang:", reply_markup=format_kb)
+        dp.downloaded_file = dest_path
 
-    # Simulyatsiya encode jarayoni
-    for i in range(0, 101, 5):
-        await asyncio.sleep(0.2)
-        await callback_query.message.edit_text(f"⚡ Encode: {i}%")
+    if data.startswith("encode_"):
+        format_choice = data.split("_")[1]
+        input_file = dp.downloaded_file
+        output_file = f"./encoded_{format_choice}_{os.path.basename(input_file)}"
 
-    await callback_query.message.edit_text(f"✅ Encode tugadi: {resolution}p")
+        await callback.message.edit_text(f"🔧 Encode jarayoni boshlandi: {format_choice}...")
+        if format_choice == "fast":
+            stream = ffmpeg.input(input_file).output(output_file, preset="ultrafast").overwrite_output()
+        else:
+            resolution = format_choice + "p"
+            stream = ffmpeg.input(input_file).output(output_file, vf=f"scale=-2:{format_choice}").overwrite_output()
+        ffmpeg.run(stream)
+
+        await callback.message.answer_document(InputFile(output_file), caption=f"✅ Video tayyor! Format: {format_choice}")
+        os.remove(input_file)
+        os.remove(output_file)
+        await callback.message.edit_text("🎬 Encode tugadi!")
 
 if __name__ == "__main__":
-    import logging
-    logging.basicConfig(level=logging.INFO)
     import asyncio
-    from aiogram import executor
-    executor.start_polling(dp, skip_updates=True)
+    asyncio.run(dp.start_polling(bot))
