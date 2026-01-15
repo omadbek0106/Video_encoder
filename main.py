@@ -2,37 +2,34 @@ import os
 import asyncio
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InputFile, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram import exceptions
+from aiogram.filters import Command, Document, Video
 import aiohttp
 import ffmpeg
 
 # Environment variables
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_ID = os.getenv("API_ID")
-API_HASH = os.getenv("API_HASH")
-
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # Helper: send download progress
 async def send_progress(chat_id, message_id, downloaded, total, prefix="📥 Yuklanmoqda"):
-    percent = int(downloaded / total * 100)
+    percent = int(downloaded / total * 100) if total else 0
     try:
         await bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
             text=f"{prefix}: {downloaded}MB / {total}MB ({percent}%)"
         )
-    except exceptions.MessageNotModified:
+    except:
         pass
 
 # /start command
-@dp.message(commands=["start"])
+@dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     await message.answer("🎬 Videoni yuboring va men uni qayta ishlab beraman. Forward videolar ham ishlaydi!")
 
 # Video or document handler
-@dp.message(lambda m: m.video or m.document)
+@dp.message(Video() | Document())
 async def video_handler(message: types.Message):
     file_size = message.video.file_size if message.video else message.document.file_size
     if file_size > 1_100_000_000:  # ~1GB limit
@@ -95,17 +92,12 @@ async def cb_handler(callback: types.CallbackQuery):
 
         await callback.message.edit_text(f"🔧 Encode jarayoni boshlandi: {format_choice}...")
 
-        # Encode progress simulation
-        probe = ffmpeg.probe(input_file)
-        total_size = probe['format']['size']
-        step = int(total_size)//20  # 20 step progress
-
+        # Encode stream
         if format_choice == "fast":
             stream = ffmpeg.input(input_file).output(output_file, preset="ultrafast").overwrite_output()
         else:
             stream = ffmpeg.input(input_file).output(output_file, vf=f"scale=-2:{format_choice}").overwrite_output()
 
-        # Run encode
         ffmpeg.run(stream)
 
         # Send result
