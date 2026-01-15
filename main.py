@@ -2,7 +2,9 @@ import os
 import asyncio
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import InputFile, InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.filters import Command, Document, Video
+from aiogram.filters import Command
+from aiogram.filters.document import Document
+from aiogram.filters.video import Video
 import aiohttp
 import ffmpeg
 
