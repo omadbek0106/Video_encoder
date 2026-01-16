@@ -1,25 +1,42 @@
 import os
 import asyncio
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
+from telethon import TelegramClient, events
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from telethon import TelegramClient
 import ffmpeg
+import aiofiles
 
 # ----------------------
 # Environment variables
 # ----------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN")
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
-
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher()
+SESSION_NAME = os.getenv("SESSION_NAME", "anon_session")  # Telethon session fayl nomi
 
 # ----------------------
-# Telethon client for large files
+# Telegram client
 # ----------------------
-client = TelegramClient('anon_session', API_ID, API_HASH)
+client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+
+# ----------------------
+# Inline keyboards
+# ----------------------
+def process_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton("Ha", callback_data="process_yes"),
+             InlineKeyboardButton("Yo'q", callback_data="process_no")]
+        ]
+    )
+
+def encode_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton("240p", callback_data="240")],
+            [InlineKeyboardButton("360p", callback_data="360")],
+            [InlineKeyboardButton("480p", callback_data="480")],
+            [InlineKeyboardButton("Ultra Fast", callback_data="ultrafast")]
+        ]
+    )
 
 # ----------------------
 # Helper functions
@@ -32,85 +49,84 @@ async def encode_video(input_path, output_path, resolution=None, ultrafast=False
         stream = ffmpeg.output(stream, output_path, vf=f"scale=-2:{resolution}", preset='ultrafast')
     ffmpeg.run(stream, overwrite_output=True)
 
-def encode_keyboard():
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton("240p", callback_data="240")],
-            [InlineKeyboardButton("360p", callback_data="360")],
-            [InlineKeyboardButton("480p", callback_data="480")],
-            [InlineKeyboardButton("Ultra Fast", callback_data="ultrafast")]
-        ]
-    )
-    return kb
-
-def process_keyboard():
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton("Ha", callback_data="process_yes"),
-             InlineKeyboardButton("Yo'q", callback_data="process_no")]
-        ]
-    )
-    return kb
-
 # ----------------------
-# Handlers
+# Event handlers
 # ----------------------
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer("Videoni yuboring va men uni qayta ishlab, linkini beraman!")
-
-@dp.message()
-async def video_handler(message: types.Message):
-    file = message.document or message.video
-    if not file:
-        return
-    file_size_mb = file.file_size / (1024*1024)
-    await message.reply(f"Videoni qayta ishlashni xohlaysizmi?\nHajmi: {file_size_mb:.2f} MB", reply_markup=process_keyboard())
-
-@dp.callback_query(lambda c: c.data in ["process_yes", "process_no"])
-async def process_decision(callback: types.CallbackQuery):
-    if callback.data == "process_no":
-        await callback.message.edit_text("Videoni qayta ishlash bekor qilindi.")
+@client.on(events.NewMessage)
+async def handler(event):
+    if not event.message.video and not event.message.document:
         return
 
-    msg = await callback.message.edit_text("Video yuklanmoqda: 0 MB")
-    file_msg = callback.message.reply_to_message
-    file_id = file_msg.document.file_id if file_msg.document else file_msg.video.file_id
-    file_info = await bot.get_file(file_id)
-    local_path = f"/tmp/{file_info.file_path.split('/')[-1]}"
+    file_size_mb = event.message.file.size / (1024 * 1024)
+    if file_size_mb > 2048:  # max 2GB limit
+        await event.reply("Kechirasiz, video juda katta (>2GB)!")
+        return
 
-    # Telethon bilan user account orqali yuklash
-    async with client:
-        await client.download_media(file_id, local_path, progress_callback=lambda d, t: asyncio.create_task(msg.edit_text(f"Yuklanmoqda: {d//(1024*1024)}MB / {t//(1024*1024)}MB")))
+    # Qayta ishlashni so‘rash
+    await event.reply(f"Videoni qayta ishlashni xohlaysizmi?\nHajmi: {file_size_mb:.2f} MB", buttons=process_keyboard())
 
-    await callback.message.answer("Videoni qaysi formatga encode qilamiz?", reply_markup=encode_keyboard())
+@client.on(events.CallbackQuery)
+async def callback_handler(event):
+    data = event.data.decode('utf-8')
 
-@dp.callback_query(lambda c: c.data in ["240", "360", "480", "ultrafast"])
-async def encode_choice(callback: types.CallbackQuery):
-    reply_msg = callback.message.reply_to_message
-    input_path = f"/tmp/{reply_msg.document.file_name if reply_msg.document else reply_msg.video.file_name}"
-    output_name = f"encoded_{callback.data}.mp4"
+    # Qayta ishlash bekor qilindi
+    if data == "process_no":
+        await event.edit("Videoni qayta ishlash bekor qilindi.")
+        return
+
+    # Video faylini yuklash
+    message = await event.get_message()
+    reply = message.reply_to_msg
+    input_path = f"/tmp/{reply.file.name if reply.file else 'video.mp4'}"
+
+    # Real download progress 5MB
+    async with aiofiles.open(input_path, 'wb') as f:
+        size_downloaded = 0
+        async for chunk in client.iter_download(reply.media, buffer_size=5*1024*1024):
+            await f.write(chunk)
+            size_downloaded += len(chunk)
+            await event.edit(f"Video yuklanmoqda: {size_downloaded/(1024*1024):.2f} MB")
+
+    # Encode tugmalari
+    await event.edit("Videoni qaysi formatga encode qilamiz?", buttons=encode_keyboard())
+
+@client.on(events.CallbackQuery)
+async def encode_callback(event):
+    data = event.data.decode('utf-8')
+    message = await event.get_message()
+    reply = message.reply_to_msg
+    input_path = f"/tmp/{reply.file.name if reply.file else 'video.mp4'}"
+    output_name = f"encoded_{data}.mp4"
     output_path = f"/tmp/{output_name}"
 
-    if callback.data == "ultrafast":
-        await callback.message.edit_text("Ultra Fast encode qilinmoqda...")
+    if data == "ultrafast":
+        await event.edit("Ultra Fast encode qilinmoqda...")
         await encode_video(input_path, output_path, ultrafast=True)
     else:
-        resolution = int(callback.data)
-        await callback.message.edit_text(f"{resolution}p ga encode qilinmoqda...")
+        resolution = int(data)
+        await event.edit(f"{resolution}p ga encode qilinmoqda...")
         await encode_video(input_path, output_path, resolution=resolution)
 
-    # Link berish
-    await callback.message.edit_text(f"Videoni tayyor! Faylni yuklab olish uchun link: file://{output_path}")
+    # Faqat link berish
+    await event.edit(f"Videoni tayyor! Fayl linki:\nfile://{output_path}")
 
-    # Serverdagi fayllarni o‘chirish
-    os.remove(input_path)
-    os.remove(output_path)
+    # Server fayllarini o‘chirish (8 soatdan keyin)
+    asyncio.create_task(auto_delete(input_path, output_path))
+
+async def auto_delete(input_path, output_path):
+    await asyncio.sleep(8*3600)
+    if os.path.exists(input_path):
+        os.remove(input_path)
+    if os.path.exists(output_path):
+        os.remove(output_path)
 
 # ----------------------
 # Main
 # ----------------------
+async def main():
+    await client.start()
+    print("Bot ishga tushdi...")
+    await client.run_until_disconnected()
+
 if __name__ == "__main__":
-    import logging
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(dp.start_polling(bot))
+    asyncio.run(main())
