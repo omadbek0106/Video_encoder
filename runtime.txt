@@ -1,1 +1,2 @@
-python-3.11
+Start command: python main.py
+Python: 3.11
