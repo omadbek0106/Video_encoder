@@ -1,4 +1,10 @@
-import os import asyncio import math import time from pyrogram import Client, filters from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import os
+import asyncio
+import math
+import time
+
+from pyrogram import Client, filters
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 ================== CONFIG ==================
 
