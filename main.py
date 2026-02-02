@@ -1,139 +1,149 @@
 import os
-import asyncio
 import time
-import math
+import asyncio
+import subprocess
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ================== CONFIG ==================
 API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
-SESSION = os.getenv("SESSION")  # session string
-
-DOWNLOAD_DIR = "downloads"
-ENCODE_DIR = "encoded"
-AUTO_DELETE = 3600  # 1 hour
-
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-os.makedirs(ENCODE_DIR, exist_ok=True)
+SESSION_STRING = os.getenv("SESSION_STRING")
 
 app = Client(
-    name="user",
+    "encoder_userbot",
     api_id=API_ID,
     api_hash=API_HASH,
-    session_string=SESSION
+    session_string=SESSION_STRING
 )
 
-# ================== HELPERS ==================
-async def download_progress(current, total, message, start):
+DOWNLOAD = "downloads/"
+OUTPUT = "outputs/"
+
+os.makedirs(DOWNLOAD, exist_ok=True)
+os.makedirs(OUTPUT, exist_ok=True)
+
+# ===== PROGRESS FUNCTION =====
+async def progress(current, total, message, start, text):
+    now = time.time()
+    diff = now - start
+    if diff < 1:
+        return
+
     percent = current * 100 / total
-    elapsed = time.time() - start
-    speed = current / elapsed if elapsed > 0 else 0
+    speed = current / diff / 1024 / 1024
 
-    text = (
-        "📥 Yuklab olinmoqda...\n"
-        f"📦 {current/1024/1024:.1f} MB / {total/1024/1024:.1f} MB\n"
-        f"⚡ {speed/1024/1024:.2f} MB/s\n"
-        f"⏳ {percent:.1f}%"
-    )
-    try:
-        await message.edit(text)
-    except:
-        pass
-
-
-async def auto_delete(*paths, delay=AUTO_DELETE):
-    await asyncio.sleep(delay)
-    for p in paths:
-        if p and os.path.exists(p):
-            os.remove(p)
-
-
-async def encode_video(input_path, output_path, ffmpeg_args, message):
-    cmd = f"ffmpeg -y -i '{input_path}' {ffmpeg_args} '{output_path}'"
-    process = await asyncio.create_subprocess_shell(
-        cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE
+    await message.edit(
+        f"{text}\n\n"
+        f"📦 {current/1024/1024:.2f} MB / {total/1024/1024:.2f} MB\n"
+        f"⚡ {speed:.2f} MB/s\n"
+        f"⏳ {percent:.2f}%"
     )
 
-    percent = 0
-    while process.returncode is None:
-        percent = min(percent + 5, 100)
-        try:
-            await message.edit(f"🎬 Encode qilinmoqda... {percent}%")
-        except:
-            pass
+# ===== AUTO DELETE =====
+async def auto_delete(*files):
+    await asyncio.sleep(3600)
+    for f in files:
+        if os.path.exists(f):
+            os.remove(f)
+
+# ===== START =====
+@app.on_message(filters.command("start"))
+async def start(client, message):
+    await message.reply(
+        "🎬 Video Encoder UserBot ishga tayyor!\n\n"
+        "Menga video yuboring."
+    )
+
+# ===== VIDEO HANDLER =====
+@app.on_message(filters.video | filters.document)
+async def video_received(client, message):
+
+    await message.reply(
+        "🎥 Video qabul qilindi!\nQayta ishlashni xohlaysizmi?",
+        reply_markup=InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Ha", callback_data="yes"),
+                InlineKeyboardButton("❌ Yo‘q", callback_data="no")
+            ]
+        ])
+    )
+
+    app.last_video = message
+
+
+# ===== CALLBACK =====
+@app.on_callback_query()
+async def callbacks(client, query):
+
+    data = query.data
+
+    if data == "no":
+        await query.message.edit("❌ Bekor qilindi")
+        return
+
+    if data == "yes":
+        await query.message.edit(
+            "Formatni tanlang:",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("240p", callback_data="240")],
+                [InlineKeyboardButton("360p", callback_data="360")],
+                [InlineKeyboardButton("480p", callback_data="480")],
+                [InlineKeyboardButton("Ultra Fast", callback_data="ultra")]
+            ])
+        )
+        return
+
+    await encode_process(client, query)
+
+
+# ===== ENCODE PROCESS =====
+async def encode_process(client, query):
+
+    msg = app.last_video
+
+    start = time.time()
+
+    status = await query.message.edit("📥 Yuklab olinmoqda...")
+
+    file = await msg.download(
+        file_name=DOWNLOAD,
+        progress=progress,
+        progress_args=(status, start, "📥 Yuklanmoqda")
+    )
+
+    out = OUTPUT + os.path.basename(file) + ".mp4"
+
+    preset = query.data
+
+    await status.edit("🎬 Encode boshlanmoqda...")
+
+    if preset == "ultra":
+        cmd = f"ffmpeg -y -i \"{file}\" -preset ultrafast \"{out}\""
+    else:
+        scales = {
+            "240": "426:240",
+            "360": "640:360",
+            "480": "854:480"
+        }
+        cmd = f"ffmpeg -y -i \"{file}\" -vf scale={scales[preset]} -preset veryfast \"{out}\""
+
+    process = await asyncio.create_subprocess_shell(cmd)
+
+    # simple encode progress loop
+    for i in range(0, 101, 5):
+        await status.edit(f"🎞 Encode qilinmoqda...\n⏳ {i}%")
         await asyncio.sleep(2)
 
     await process.wait()
 
-# ================== BUTTONS ==================
-ENCODE_BUTTONS = InlineKeyboardMarkup([
-    [InlineKeyboardButton("240p", callback_data="240")],
-    [InlineKeyboardButton("360p", callback_data="360")],
-    [InlineKeyboardButton("480p", callback_data="480")],
-    [InlineKeyboardButton("Ultra Fast", callback_data="ultra")]
-])
+    await status.edit("📤 Telegramga yuborilmoqda...")
 
-# ================== HANDLERS ==================
-@app.on_message(filters.video | filters.document)
-async def on_video(client, message):
-    message._cached_video = message
-    await message.reply(
-        "🎥 Video qabul qilindi. Qayta ishlashni xohlaysizmi?",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Ha", callback_data="yes")],
-            [InlineKeyboardButton("❌ Yo‘q", callback_data="no")]
-        ])
-    )
+    await msg.reply_video(out, caption="✅ Encode qilingan video")
+
+    asyncio.create_task(auto_delete(file, out))
+
+    await status.edit("🎉 Tayyor!")
 
 
-@app.on_callback_query(filters.regex("yes"))
-async def choose_encode(client, query):
-    await query.message.edit(
-        "⚙ Encode turini tanlang:",
-        reply_markup=ENCODE_BUTTONS
-    )
-
-
-@app.on_callback_query(filters.regex("240|360|480|ultra"))
-async def process_encode(client, query):
-    msg = query.message.reply_to_message
-    start = time.time()
-
-    progress_msg = await query.message.edit("📥 Yuklab olinmoqda...")
-
-    file_path = await msg.download(
-        file_name=f"{DOWNLOAD_DIR}/{msg.id}",
-        progress=download_progress,
-        progress_args=(progress_msg, start)
-    )
-
-    if query.data == "240":
-        ffmpeg_args = "-vf scale=426:240 -preset veryfast"
-    elif query.data == "360":
-        ffmpeg_args = "-vf scale=640:360 -preset veryfast"
-    elif query.data == "480":
-        ffmpeg_args = "-vf scale=854:480 -preset veryfast"
-    else:
-        ffmpeg_args = "-preset ultrafast -crf 35"
-
-    output_path = f"{ENCODE_DIR}/{os.path.basename(file_path)}.mp4"
-
-    encode_msg = await progress_msg.edit("🎬 Encode boshlanmoqda...")
-    await encode_video(file_path, output_path, ffmpeg_args, encode_msg)
-
-    await encode_msg.edit("📤 Telegramga yuborilmoqda...")
-    await msg.reply_video(output_path)
-
-    asyncio.create_task(auto_delete(file_path, output_path))
-
-
-@app.on_callback_query(filters.regex("no"))
-async def cancel(query):
-    await query.message.edit("❌ Bekor qilindi")
-
-# ================== RUN ==================
-if __name__ == "__main__":
-    app.run()
+print("UserBot ishga tushmoqda...")
+app.run()
